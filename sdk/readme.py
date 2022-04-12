@@ -15,6 +15,7 @@ BRANCH = 'main' #default - do not change
 BRANCH = 'sdk-preview' #this should be deleted when this branch is merged to main
 BRANCH = 'april-sdk-preview' #this should be deleted when this branch is merged to sdk-preview
 
+
 def main(args):
     
     # get list of notebooks
@@ -122,71 +123,98 @@ jobs:
       workflow_yaml += f"""
           # generate a random workspace name
           # sed -i -e "s/mlw-basic-prod/mlw-basic-prod-$(echo $RANDOM | md5sum | head -c 10)/g" {name}.ipynb
-
           # skip other workpace creation commands for now
           sed -i -e "s/ml_client.begin_create_or_update(ws_with_existing)/# ml_client.begin_create_or_update(ws_with_existing)/g" {name}.ipynb        
           sed -i -e "s/ml_client.workspaces.begin_create(ws_private_link)/# ml_client.workspaces.begin_create(ws_private_link)/g" {name}.ipynb        
-          sed -i -e "s/ml_client.workspaces.begin_create(ws_private_link)/# ws_from_config = MLClient.from_config()/g" {name}.ipynb\n"""            
-    
-    workflow_yaml += f"""          
-          papermill {name}.ipynb - -k python
-      working-directory: sdk/{folder}\n"""
+          sed -i -e "s/ml_client.workspaces.begin_create(ws_private_link)/# ws_from_config = MLClient.from_config()/g" {name}.ipynb\n"""
 
-    # write workflow
-    with open(f"../.github/workflows/sdk-{classification}-{name}.yml", "w") as f:
-        f.write(workflow_yaml)
+    if not ("automl" in folder):
+        workflow_yaml += f"""
+          papermill -k python {name}.ipynb {name}.output.ipynb
+      working-directory: sdk/{folder}"""
+    elif "nlp" in folder or "image" in folder:
+        # need GPU cluster, so override the compute cluster name to dedicated
+        workflow_yaml += f"""          
+          papermill -k python -p compute_name automl-gpu-cluster {name}.ipynb {name}.output.ipynb
+      working-directory: sdk/{folder}"""
+    else:
+        # need CPU cluster, so override the compute cluster name to dedicated
+        workflow_yaml += f"""
+          papermill -k python -p compute_name automl-cpu-cluster {name}.ipynb {name}.output.ipynb
+      working-directory: sdk/{folder}"""
 
-def write_readme(notebooks, folder=None):
-  prefix = "prefix.md"
-  suffix = "suffix.md"
-  readme_file = "README.md"
-  if folder:
-    prefix = f"{folder}/{prefix}"
-    suffix = f"{folder}/{suffix}"
-    readme_file = f"{folder}/{readme_file}"
+    workflow_yaml += f"""
+    - name: upload notebook's working folder as an artifact
+      if: ${{{{ always() }}}}
+      uses: actions/upload-artifact@v2
+      with:
+        name: {name}
+        path: sdk/{folder}\n"""
 
-  if BRANCH=="":
-    branch="main"
-  else:
-    branch=BRANCH
-    # read in prefix.md and suffix.md
-    with open(prefix, "r") as f:
-        prefix = f.read()
-    with open(suffix, "r") as f:
-        suffix = f.read()    
-    
-    # define markdown tables
-    notebook_table = f"Test Status is for branch - **_{branch}_**\n|Area|Sub-Area|Notebook|Description|Status|\n|--|--|--|--|--|\n"
-    for notebook in notebooks:
-        # get notebook name
-        name = notebook.split("/")[-1].replace(".ipynb", "")
-        area = notebook.split("/")[0]
-        sub_area = notebook.split("/")[1]
-        folder = os.path.dirname(notebook)
-        classification = folder.replace("/","-")
+    workflow_file = f"../.github/workflows/sdk-{classification}-{name}.yml"
+    workflow_before = ""
+    if os.path.exists(workflow_file):
+        with open(workflow_file, "r") as f:
+            workflow_before = f.read()
 
-        try:
-          # read in notebook
-          with open(notebook, "r") as f:
-              data = json.load(f)
+    if workflow_yaml != workflow_before:
+        # write workflow
+        with open(workflow_file, "w") as f:
+            f.write(workflow_yaml)
 
-          description = "*no description*"
-          try:
-            if data["metadata"]["description"] is not None:
-              description = data["metadata"]["description"]["description"]
-          except:
-            pass
-        except:
-          print('Could not load', notebook)
-          pass
+def write_readme(notebooks):
+    if BRANCH == "":
+        branch = "main"
+    else:
+        branch = BRANCH
+        # read in prefix.md and suffix.md
+        with open("prefix.md", "r") as f:
+            prefix = f.read()
+        with open("suffix.md", "r") as f:
+            suffix = f.read()
 
-        # write workflow file        
-        notebook_table += write_readme_row(branch, notebook, name, classification, area, sub_area, description) + "\n"
+        # define markdown tables
+        notebook_table = f"Test Status is for branch - **_{branch}_**\n|Area|Sub-Area|Notebook|Description|Status|\n|--|--|--|--|--|\n"
+        for notebook in notebooks:
+            # get notebook name
+            name = notebook.split("/")[-1].replace(".ipynb", "")
+            area = notebook.split("/")[0]
+            sub_area = notebook.split("/")[1]
+            folder = os.path.dirname(notebook)
+            classification = folder.replace("/", "-")
 
-    print("writing README.md...")
-    with open(readme_file, "w") as f:
-        f.write(prefix + notebook_table + suffix)
-    print("finished writing README.md")
+            try:
+                # read in notebook
+                with open(notebook, "r") as f:
+                    data = json.load(f)
+
+                description = "*no description*"
+                try:
+                    if data["metadata"]["description"] is not None:
+                        description = data["metadata"]["description"]["description"]
+                except:
+                    pass
+            except:
+                print("Could not load", notebook)
+                pass
+
+            if any(excluded in notebook for excluded in NOT_TESTED_NOTEBOOKS):
+                description += " - _This sample is excluded from automated tests_"
+            if any(excluded in notebook for excluded in NOT_SCHEDULED_NOTEBOOKS):
+                description += " - _This sample is only tested on demand_"
+
+            # write workflow file
+            notebook_table += (
+                write_readme_row(
+                    branch, notebook, name, classification, area, sub_area, description
+                )
+                + "\n"
+            )
+
+        print("writing README.md...")
+        with open("README.md", "w") as f:
+            f.write(prefix + notebook_table + suffix)
+        print("finished writing README.md")
 
 def write_readme_row(branch, notebook, name, classification, area, sub_area, description):
     gh_link = 'https://github.com/Azure/azureml-examples/actions/workflows'
